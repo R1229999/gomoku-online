@@ -649,18 +649,26 @@ function handleMqMsg(payload){
   lastPeerSeen = Date.now();
 
   switch(msg.type){
-    case 'hello':
+    case 'join':
       peerId = msg.id;
       if(myColor === 0){
         myColor = (mqClientId < msg.id) ? 1 : 2;
         startOnline();
-        mq.publish(mqTopic, JSON.stringify({ type:'hello', id:mqClientId, ts:Date.now() }));
+        mq.publish(mqTopic, JSON.stringify({ type:'welcome', id:mqClientId, to:msg.id, from:mqClientId }));
       } else {
-        mq.publish(mqTopic, JSON.stringify({ type:'sync', id:mqClientId, to:msg.id, from:mqClientId, moves: moves.slice() }));
+        mq.publish(mqTopic, JSON.stringify({ type:'state', id:mqClientId, to:msg.id, from:mqClientId, moves: moves.slice() }));
         setStatus('对手已重连');
       }
       break;
-    case 'sync':
+    case 'welcome':
+      if(msg.to !== mqClientId) break;
+      peerId = msg.from || peerId;
+      if(myColor === 0){
+        myColor = (mqClientId < peerId) ? 1 : 2;
+        startOnline();
+      }
+      break;
+    case 'state':
       if(msg.to !== mqClientId) break;
       peerId = msg.from || peerId;
       if(myColor === 0) myColor = (mqClientId < peerId) ? 1 : 2;
@@ -668,6 +676,7 @@ function handleMqMsg(payload){
       onlineStarted = true;
       setStatus('已同步对局');
       break;
+
     case 'move':
       if(msg.x == null || msg.y == null || msg.color == null) break;
       if(board[msg.x][msg.y]) break;
@@ -703,7 +712,7 @@ function mqStart(code){
       setStatus('已连接，房间 ' + code + ' 等待对手加入...');
       mq.subscribe(mqTopic);
       setTimeout(function(){
-        if(mq && mq.connected) mq.publish(mqTopic, JSON.stringify({ type:'hello', id:mqClientId, ts:Date.now() }));
+        if(mq && mq.connected) mq.publish(mqTopic, JSON.stringify({ type:'join', id:mqClientId, ts:Date.now() }));
       }, 200);
       startPresence();
     },
@@ -790,7 +799,6 @@ function setMode(m){
   $('connPanel').classList.toggle('show', m === 'online');
   $('chatPanel').classList.toggle('show', m === 'online');
   $('undoBtn').style.display = (m === 'online') ? 'none' : 'inline-block';
-  if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
   if(aiTimer){ clearTimeout(aiTimer); aiTimer = null; }
   if(m !== 'online' && mq){
     try{ mq.close(); }catch(e){}
