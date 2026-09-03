@@ -425,8 +425,9 @@ function sendMsg(obj){
 }
 
 function connectSocket(action){
-  const addr = $('wsAddr').value.trim();
+  let addr = $('wsAddr').value.trim();
   if(!/^wss?:\/\//.test(addr)){ setStatus('请输入正确的 ws 地址'); return; }
+  if(/^wss?:\/\/[^/]+$/.test(addr)) addr += '/ws';
   if(ws){
     try{ ws.onclose = null; ws.onerror = null; ws.close(); }catch(e){}
   }
@@ -650,7 +651,7 @@ window.addEventListener('orientationchange', function(){ setTimeout(resize, 200)
 (function(){
   const inp = $('wsAddr');
   if(!inp.value.trim()){
-    inp.value = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+    inp.value = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
   }
 })();
 
