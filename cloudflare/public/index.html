@@ -62,7 +62,7 @@ canvas { border-radius:8px; box-shadow:0 8px 30px rgba(0,0,0,.45); display:block
   </div>
 
   <div id="connPanel">
-    <input id="wsAddr" placeholder="留空则自动使用当前站点地址">
+    
     <div class="row">
       <input id="roomCode" placeholder="4位房间码" maxlength="4" inputmode="numeric" pattern="[0-9]*">
       <button class="gold" id="createBtn">创建房间</button>
@@ -113,13 +113,175 @@ let mode = 'local';
 let myColor = 0;
 let onlineStarted = false;
 let roomCode = '';
-let ws = null;
-let pendingAction = null;
-let reconnectTimer = null;
-let reconnectAttempts = 0;
+let mq = null;
+let mqClientId = '';
+let mqTopic = '';
+let peerId = '';
+let presenceTimer = null;
+let lastPeerSeen = 0;
 let aiTimer = null;
 let lastMove = null;
 
+
+const MQTT_BROKER = 'wss://broker-cn.emqx.io:8084/mqtt';
+
+function mqEncodeLength(n){
+  const b = [];
+  do { let d = n % 128; n = Math.floor(n / 128); if(n > 0) d |= 128; b.push(d); } while(n > 0);
+  return b;
+}
+function mqUtf8(str){
+  if(typeof TextEncoder !== 'undefined') return Array.from(new TextEncoder().encode(str));
+  const s = unescape(encodeURIComponent(str));
+  const out = [];
+  for(let i = 0; i < s.length; i++) out.push(s.charCodeAt(i));
+  return out;
+}
+function mqUtf8Decode(bytes){
+  if(typeof TextDecoder !== 'undefined') return new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+  let s = '';
+  for(let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return decodeURIComponent(escape(s));
+}
+
+class MqttMini {
+  constructor(url, opts){
+    this.url = url;
+    this.clientId = opts.clientId;
+    this.onConnect = opts.onConnect;
+    this.onMessage = opts.onMessage;
+    this.onClose = opts.onClose;
+    this.connected = false;
+    this.keepalive = 30;
+    this.ws = null;
+    this.pingTimer = null;
+    this.reconnectTimer = null;
+    this.reconnectAttempts = 0;
+    this.closedByUser = false;
+    this._open();
+  }
+  _open(){
+    try{
+      const ws = new WebSocket(this.url, ['mqtt']);
+      this.ws = ws;
+      ws.binaryType = 'arraybuffer';
+      const self = this;
+      ws.onopen = function(){
+        self.connected = true;
+        self.reconnectAttempts = 0;
+        try{ ws.send(self._connectPacket()); }catch(e){}
+        self._startPing();
+      };
+      ws.onmessage = function(ev){ self._handle(ev.data); };
+      ws.onclose = function(){
+        self.connected = false;
+        self._stopPing();
+        if(!self.closedByUser) self._scheduleReconnect();
+        if(self.onClose) self.onClose();
+      };
+      ws.onerror = function(){ try{ ws.close(); }catch(e){} };
+    }catch(e){
+      this._scheduleReconnect();
+    }
+  }
+  _connectPacket(){
+    const vh = [0x00,0x04,0x4D,0x51,0x54,0x54,0x04,0x02,0x00,this.keepalive];
+    const id = mqUtf8(this.clientId);
+    const payload = [(id.length >> 8) & 0xff, id.length & 0xff].concat(id);
+    const body = vh.concat(payload);
+    return new Uint8Array([0x10].concat(mqEncodeLength(body.length), body));
+  }
+  _subscribePacket(topic){
+    const pid = 1;
+    const tf = mqUtf8(topic);
+    const body = [(pid >> 8) & 0xff, pid & 0xff, (tf.length >> 8) & 0xff, tf.length & 0xff].concat(tf, [0]);
+    return new Uint8Array([0x82].concat(mqEncodeLength(body.length), body));
+  }
+  _publishPacket(topic, payloadStr){
+    const tf = mqUtf8(topic);
+    const pl = mqUtf8(payloadStr);
+    const body = [(tf.length >> 8) & 0xff, tf.length & 0xff].concat(tf, pl);
+    return new Uint8Array([0x30].concat(mqEncodeLength(body.length), body));
+  }
+  _pingPacket(){
+    return new Uint8Array([0xC0, 0x00]);
+  }
+  _startPing(){
+    const self = this;
+    this._stopPing();
+    this.pingTimer = setInterval(function(){
+      if(self.connected && self.ws && self.ws.readyState === 1){
+        try{ self.ws.send(self._pingPacket()); }catch(e){}
+      }
+    }, (this.keepalive - 5) * 1000);
+  }
+  _stopPing(){
+    if(this.pingTimer){ clearInterval(this.pingTimer); this.pingTimer = null; }
+  }
+  _scheduleReconnect(){
+    const self = this;
+    if(this.reconnectTimer || this.closedByUser) return;
+    const delay = Math.min(15000, 1000 * Math.pow(2, this.reconnectAttempts++));
+    this.reconnectTimer = setTimeout(function(){
+      self.reconnectTimer = null;
+      if(self.closedByUser) return;
+      self._open();
+    }, delay);
+  }
+  subscribe(topic){
+    if(this.connected && this.ws && this.ws.readyState === 1){
+      try{ this.ws.send(this._subscribePacket(topic)); }catch(e){}
+    }
+  }
+  publish(topic, payloadStr){
+    if(this.connected && this.ws && this.ws.readyState === 1){
+      try{ this.ws.send(this._publishPacket(topic, payloadStr)); }catch(e){}
+    }
+  }
+  close(){
+    this.closedByUser = true;
+    this._stopPing();
+    if(this.reconnectTimer){ clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if(this.ws){
+      try{ this.ws.onclose = null; this.ws.close(); }catch(e){}
+    }
+    this.connected = false;
+  }
+  _handle(data){
+    const bytes = Array.from(new Uint8Array(data));
+    let idx = 0;
+    while(idx < bytes.length){
+      const first = bytes[idx++];
+      const type = first >> 4;
+      const flags = first & 0x0F;
+      let mult = 1, rem = 0, d;
+      do {
+        if(idx >= bytes.length) return;
+        d = bytes[idx++];
+        rem += (d & 127) * mult;
+        mult *= 128;
+      } while((d & 128) !== 0);
+      const end = idx + rem;
+      if(type === 2){
+        const rc = bytes[idx + 1];
+        if(rc === 0 && this.onConnect) this.onConnect();
+      } else if(type === 9){
+        // SUBACK, ignore
+      } else if(type === 13){
+        // PINGRESP, ignore
+      } else if(type === 3){
+        const tlen = (bytes[idx] << 8) | bytes[idx + 1];
+        idx += 2;
+        const topic = mqUtf8Decode(bytes.slice(idx, idx + tlen));
+        idx += tlen;
+        if(flags & 0x06) idx += 2;
+        const payload = mqUtf8Decode(bytes.slice(idx, end));
+        if(this.onMessage) this.onMessage(topic, payload);
+      }
+      idx = end;
+    }
+  }
+}
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 let size = 0, margin = 0, cell = 0;
@@ -419,105 +581,92 @@ function resetGame(){
 }
 
 function sendMsg(obj){
-  if(ws && ws.readyState === WebSocket.OPEN){
-    try{ ws.send(JSON.stringify(obj)); }catch(e){}
+  if(mq && mq.connected){
+    obj.id = mqClientId;
+    mq.publish(mqTopic, JSON.stringify(obj));
   }
 }
 
-function connectSocket(action){
-  let addr = $('wsAddr').value.trim();
-  if(!/^wss?:\/\//.test(addr)){ setStatus('请输入正确的 ws 地址'); return; }
-  if(/^wss?:\/\/[^/]+$/.test(addr)) addr += '/ws';
-  if(ws){
-    try{ ws.onclose = null; ws.onerror = null; ws.close(); }catch(e){}
+function ensureClientId(){
+  if(mqClientId) return mqClientId;
+  try{ mqClientId = localStorage.getItem('gomoku_client_id') || ''; }catch(e){}
+  if(!mqClientId){
+    mqClientId = 'g_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+    try{ localStorage.setItem('gomoku_client_id', mqClientId); }catch(e){}
   }
-  pendingAction = action || null;
-  try{ ws = new WebSocket(addr); }catch(e){ setStatus('连接失败'); return; }
-  setStatus('正在连接...');
-  ws.onopen = function(){
-    reconnectAttempts = 0;
-    if(pendingAction){ const a = pendingAction; pendingAction = null; sendMsg(a); }
-    else setStatus('已连接服务器');
-  };
-  ws.onmessage = handleMsg;
-  ws.onclose = function(){
-    if(mode === 'online' && roomCode && myColor){
-      setStatus('连接断开，正在重连...');
-      scheduleReconnect();
+  return mqClientId;
+}
+
+function startOnline(){
+  onlineStarted = true;
+  lastPeerSeen = Date.now();
+  resetGame();
+  setStatus('对局开始，你是' + (myColor === 1 ? '黑方' : '白方'));
+  updateInfo();
+}
+
+function applySyncMoves(list){
+  resetGame();
+  (list || []).forEach(function(m){
+    if(m && m.x != null && m.y != null && m.color != null && !board[m.x][m.y]){
+      board[m.x][m.y] = m.color;
+      moves.push(m);
     }
-  };
-  ws.onerror = function(){ try{ ws.close(); }catch(e){} };
+  });
+  if(moves.length){
+    lastMove = moves[moves.length - 1];
+    if(checkWin(lastMove.x, lastMove.y, lastMove.color)){
+      gameOver = true;
+      setStatus('🏆 ' + (lastMove.color === 1 ? '黑方获胜' : '白方获胜'));
+    } else if(moves.length === N * N){
+      gameOver = true;
+      setStatus('🏆 平局');
+    }
+  }
+  current = (moves.length % 2 === 0) ? 1 : 2;
+  draw();
+  updateInfo();
 }
 
-function scheduleReconnect(){
-  if(reconnectTimer) return;
-  const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts++));
-  reconnectTimer = setTimeout(function(){
-    reconnectTimer = null;
-    connectSocket({ type:'rejoin', room: roomCode, color: myColor });
-  }, delay);
+function startPresence(){
+  stopPresence();
+  if(mode !== 'online') return;
+  presenceTimer = setInterval(function(){
+    if(mq && mq.connected){
+      mq.publish(mqTopic, JSON.stringify({ type:'presence', id:mqClientId, ts:Date.now() }));
+    }
+  }, 10000);
 }
 
-function createRoom(){
-  const code = $('roomCode').value.trim();
-  if(!/^\d{4}$/.test(code)){ setStatus('请输入4位数字房间码'); return; }
-  myColor = 0; roomCode = ''; onlineStarted = false;
-  connectSocket({ type:'create', room: code });
+function stopPresence(){
+  if(presenceTimer){ clearInterval(presenceTimer); presenceTimer = null; }
 }
 
-function joinRoom(){
-  const code = $('roomCode').value.trim();
-  if(!/^\d{4}$/.test(code)){ setStatus('请输入4位数字房间码'); return; }
-  myColor = 0; roomCode = ''; onlineStarted = false;
-  connectSocket({ type:'join', room: code });
-}
-
-function handleMsg(e){
+function handleMqMsg(payload){
   let msg;
-  try{ msg = JSON.parse(e.data); }catch(err){ return; }
+  try{ msg = JSON.parse(payload); }catch(e){ return; }
+  if(!msg || msg.id === mqClientId) return;
+  lastPeerSeen = Date.now();
+
   switch(msg.type){
-    case 'created':
-      myColor = 1; roomCode = msg.room; onlineStarted = false;
-      resetGame();
-      setStatus('房间 ' + msg.room + ' 已创建，你是黑方，等待对手加入...');
-      break;
-    case 'joined':
-      myColor = 2; roomCode = msg.room; onlineStarted = false;
-      resetGame();
-      setStatus('已加入房间 ' + msg.room + '，你是白方，等待开始...');
-      break;
-    case 'rejoined':
-      myColor = msg.color; roomCode = msg.room;
-      setStatus('重连成功');
-      break;
-    case 'start':
-      onlineStarted = true;
-      resetGame();
-      setStatus('对局开始，你是' + (myColor === 1 ? '黑方' : '白方'));
-      break;
-    case 'resume':
-      onlineStarted = true;
-      setStatus('对局继续');
+    case 'hello':
+      peerId = msg.id;
+      if(myColor === 0){
+        myColor = (mqClientId < msg.id) ? 1 : 2;
+        startOnline();
+        mq.publish(mqTopic, JSON.stringify({ type:'hello', id:mqClientId, ts:Date.now() }));
+      } else {
+        mq.publish(mqTopic, JSON.stringify({ type:'sync', id:mqClientId, to:msg.id, from:mqClientId, moves: moves.slice() }));
+        setStatus('对手已重连');
+      }
       break;
     case 'sync':
-      resetGame();
-      (msg.moves || []).forEach(function(m){
-        board[m.x][m.y] = m.color;
-        moves.push(m);
-      });
-      if(moves.length){
-        lastMove = moves[moves.length - 1];
-        if(checkWin(lastMove.x, lastMove.y, lastMove.color)){
-          gameOver = true;
-          setStatus('🏆 ' + (lastMove.color === 1 ? '黑方获胜' : '白方获胜'));
-        } else if(moves.length === N * N){
-          gameOver = true;
-          setStatus('🏆 平局');
-        }
-      }
-      current = (moves.length % 2 === 0) ? 1 : 2;
-      draw();
-      updateInfo();
+      if(msg.to !== mqClientId) break;
+      peerId = msg.from || peerId;
+      if(myColor === 0) myColor = (mqClientId < peerId) ? 1 : 2;
+      applySyncMoves(msg.moves);
+      onlineStarted = true;
+      setStatus('已同步对局');
       break;
     case 'move':
       if(msg.x == null || msg.y == null || msg.color == null) break;
@@ -533,17 +682,54 @@ function handleMsg(e){
     case 'chat':
       addChat(msg);
       break;
-    case 'opponent_disconnected':
-      setStatus('对方已断开，等待重连...');
-      break;
-    case 'error':
-      setStatus('❌ ' + msg.message);
-      break;
-    case 'pong':
+    case 'presence':
       break;
   }
 }
 
+function mqStart(code){
+  ensureClientId();
+  mqTopic = 'gomoku/' + code;
+  peerId = '';
+  myColor = 0;
+  onlineStarted = false;
+  lastPeerSeen = Date.now();
+  resetGame();
+  if(mq){ try{ mq.close(); }catch(e){} }
+  stopPresence();
+  mq = new MqttMini(MQTT_BROKER, {
+    clientId: mqClientId,
+    onConnect: function(){
+      setStatus('已连接，房间 ' + code + ' 等待对手加入...');
+      mq.subscribe(mqTopic);
+      setTimeout(function(){
+        if(mq && mq.connected) mq.publish(mqTopic, JSON.stringify({ type:'hello', id:mqClientId, ts:Date.now() }));
+      }, 200);
+      startPresence();
+    },
+    onMessage: function(topic, payload){ handleMqMsg(payload); },
+    onClose: function(){
+      if(mode === 'online') setStatus('连接断开，正在重连...');
+      stopPresence();
+    }
+  });
+}
+
+function createRoom(){
+  const code = $('roomCode').value.trim();
+  if(!/^\d{4}$/.test(code)){ setStatus('请输入4位数字房间码'); return; }
+  roomCode = code;
+  setStatus('正在连接房间 ' + code + ' ...');
+  mqStart(code);
+}
+
+function joinRoom(){
+  const code = $('roomCode').value.trim();
+  if(!/^\d{4}$/.test(code)){ setStatus('请输入4位数字房间码'); return; }
+  roomCode = code;
+  setStatus('正在加入房间 ' + code + ' ...');
+  mqStart(code);
+}
 function onlinePlay(x, y){
   if(gameOver || !onlineStarted) return;
   if(board[x][y]) return;
@@ -574,7 +760,7 @@ function sendChat(){
   const inp = $('chatInput');
   const text = inp.value.trim();
   if(!text) return;
-  if(!ws || ws.readyState !== WebSocket.OPEN){ setStatus('尚未连接'); return; }
+  if(!mq || !mq.connected){ setStatus('尚未连接'); return; }
   sendMsg({ type:'chat', text:text, from:myColor });
   addChat({ text:text, from:myColor, self:true });
   inp.value = '';
@@ -606,9 +792,10 @@ function setMode(m){
   $('undoBtn').style.display = (m === 'online') ? 'none' : 'inline-block';
   if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
   if(aiTimer){ clearTimeout(aiTimer); aiTimer = null; }
-  if(m !== 'online' && ws){
-    try{ ws.onclose = null; ws.close(); }catch(e){}
-    ws = null;
+  if(m !== 'online' && mq){
+    try{ mq.close(); }catch(e){}
+    mq = null;
+    stopPresence();
     onlineStarted = false;
   }
   resetGame();
@@ -648,12 +835,6 @@ document.addEventListener('touchend', function(e){
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', function(){ setTimeout(resize, 200); });
 
-(function(){
-  const inp = $('wsAddr');
-  if(!inp.value.trim()){
-    inp.value = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
-  }
-})();
 
 initBoard();
 setMode('local');
