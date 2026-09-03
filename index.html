@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<title>五子棋 · 双人对战</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html, body { height:100%; }
+body { font-family:-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; background:#1b1b22; color:#e8e8ea; min-height:100%; display:flex; flex-direction:column; align-items:center; padding:12px; user-select:none; -webkit-user-select:none; touch-action:manipulation; }
+.wrap { width:100%; max-width:520px; display:flex; flex-direction:column; gap:12px; }
+h1 { font-size:20px; text-align:center; letter-spacing:3px; color:#f2c14e; }
+.modes { display:flex; gap:8px; }
+.mode-btn { flex:1; padding:10px 0; border:1px solid #3a3a45; border-radius:10px; background:#25252e; color:#bbb; font-size:15px; cursor:pointer; }
+.mode-btn.active { background:#d9a441; border-color:#d9a441; color:#1b1b22; font-weight:700; }
+#connPanel { display:none; flex-direction:column; gap:8px; background:#23232b; border-radius:12px; padding:12px; }
+#connPanel.show { display:flex; }
+.row { display:flex; gap:8px; }
+input, button { font-size:15px; }
+input { flex:1; min-width:0; padding:10px; border:1px solid #3a3a45; border-radius:10px; background:#16161d; color:#eee; outline:none; }
+button { padding:10px 14px; border:none; border-radius:10px; background:#3a6ea5; color:#fff; cursor:pointer; }
+button:active { transform:scale(0.97); }
+button.gold { background:#d9a441; color:#1b1b22; font-weight:700; }
+button.gray { background:#3a3a45; color:#ddd; }
+#status { text-align:center; font-size:14px; min-height:20px; color:#f2c14e; }
+.board-box { display:flex; justify-content:center; }
+canvas { border-radius:8px; box-shadow:0 8px 30px rgba(0,0,0,.45); display:block; }
+.controls { display:flex; justify-content:space-between; align-items:center; }
+.turn-wrap { display:flex; align-items:center; gap:8px; font-size:15px; }
+.dot { width:16px; height:16px; border-radius:50%; display:inline-block; box-shadow:0 0 4px rgba(0,0,0,.4); }
+.dot.black { background:#111; }
+.dot.white { background:#eee; border:1px solid #999; }
+.btns { display:flex; gap:8px; }
+.panel { background:#23232b; border-radius:12px; padding:12px; }
+.panel-title { font-size:15px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; }
+#chatPanel { display:none; }
+#chatPanel.show { display:block; }
+#chatMsgs { height:140px; overflow-y:auto; background:#16161d; border-radius:8px; padding:8px; margin-bottom:8px; font-size:14px; }
+.msg { margin-bottom:6px; line-height:1.4; word-break:break-all; }
+.msg .who { color:#f2c14e; margin-right:6px; }
+.msg.other { color:#ddd; }
+.msg.me { color:#9fd0ff; }
+.emoji-row { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px; }
+.emoji-row button { background:#2e2e39; border:1px solid #3a3a45; font-size:20px; padding:4px 8px; }
+.chat-input { display:flex; gap:8px; }
+.chat-input input { flex:1; }
+#historyList { max-height:160px; overflow-y:auto; font-size:13px; }
+.h-item { display:flex; gap:8px; padding:6px 4px; border-bottom:1px solid #2e2e39; color:#bbb; }
+.h-item .tag { color:#f2c14e; }
+.empty { color:#777; text-align:center; padding:10px; }
+.mini { padding:4px 8px; font-size:12px; background:#3a3a45; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>五子棋 · 双人对战</h1>
+  <div class="modes">
+    <button class="mode-btn active" data-mode="local">本地双人</button>
+    <button class="mode-btn" data-mode="ai">人机对战</button>
+    <button class="mode-btn" data-mode="online">联机对战</button>
+  </div>
+
+  <div id="connPanel">
+    <input id="wsAddr" placeholder="留空则自动使用当前站点地址">
+    <div class="row">
+      <input id="roomCode" placeholder="4位房间码" maxlength="4" inputmode="numeric" pattern="[0-9]*">
+      <button class="gold" id="createBtn">创建房间</button>
+      <button id="joinBtn">加入房间</button>
+    </div>
+  </div>
+
+  <div id="status"></div>
+
+  <div class="board-box"><canvas id="board"></canvas></div>
+
+  <div class="controls">
+    <div class="turn-wrap"><span id="turnDot" class="dot black"></span><span id="turn">当前: 黑棋</span></div>
+    <div class="btns">
+      <button class="gray" id="undoBtn">悔棋</button>
+      <button class="gray" id="resetBtn">重新开始</button>
+    </div>
+  </div>
+
+  <div id="chatPanel" class="panel">
+    <div class="panel-title">💬 聊天</div>
+    <div id="chatMsgs"></div>
+    <div class="emoji-row">
+      <button type="button">😀</button><button type="button">😄</button><button type="button">😂</button><button type="button">😎</button><button type="button">👍</button><button type="button">🙏</button><button type="button">🎉</button><button type="button">❤️</button><button type="button">😢</button><button type="button">😡</button>
+    </div>
+    <div class="chat-input">
+      <input id="chatInput" placeholder="输入聊天内容...">
+      <button id="sendChat">发送</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">📜 历史对局 <button class="mini" id="clearHistory">清空</button></div>
+    <div id="historyList"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+'use strict';
+
+const N = 15;
+let board = [];
+let current = 1;
+let gameOver = false;
+let moves = [];
+let mode = 'local';
+let myColor = 0;
+let onlineStarted = false;
+let roomCode = '';
+let ws = null;
+let pendingAction = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let aiTimer = null;
+let lastMove = null;
+
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+let size = 0, margin = 0, cell = 0;
+
+const $ = id => document.getElementById(id);
+const statusEl = $('status');
+const turnEl = $('turn');
+const turnDot = $('turnDot');
+
+function initBoard(){
+  board = Array.from({length:N}, () => Array(N).fill(0));
+  moves = [];
+  current = 1;
+  gameOver = false;
+  lastMove = null;
+  if(aiTimer){ clearTimeout(aiTimer); aiTimer = null; }
+}
+
+function setStatus(t){ statusEl.textContent = t; }
+
+function resize(){
+  const box = canvas.parentElement;
+  const avail = Math.max(280, Math.min(box.clientWidth || 320, 520));
+  size = avail;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(size * dpr);
+  canvas.height = Math.round(size * dpr);
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+  margin = size / 15;
+  cell = (size - margin * 2) / 14;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+function draw(){
+  ctx.clearRect(0, 0, size, size);
+  const bg = ctx.createLinearGradient(0, 0, size, size);
+  bg.addColorStop(0, '#e7b95c');
+  bg.addColorStop(1, '#d39a3f');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, size, size);
+
+  ctx.strokeStyle = 'rgba(0,0,0,0.05)';
+  for(let i = 0; i < size; i += 16){
+    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(size, i); ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#6b4a1f';
+  ctx.lineWidth = 1;
+  for(let i = 0; i < N; i++){
+    ctx.beginPath();
+    ctx.moveTo(margin, margin + i * cell);
+    ctx.lineTo(margin + 14 * cell, margin + i * cell);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(margin + i * cell, margin);
+    ctx.lineTo(margin + i * cell, margin + 14 * cell);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = '#4d3315';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(margin, margin, 14 * cell, 14 * cell);
+
+  ctx.fillStyle = '#4d3315';
+  [[3,3],[3,11],[11,3],[11,11],[7,7]].forEach(function(p){
+    ctx.beginPath();
+    ctx.arc(margin + p[0] * cell, margin + p[1] * cell, cell * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  for(let x = 0; x < N; x++){
+    for(let y = 0; y < N; y++){
+      if(board[x][y]) drawStone(margin + x * cell, margin + y * cell, board[x][y]);
+    }
+  }
+
+  if(lastMove){
+    ctx.strokeStyle = '#ff3b30';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(margin + lastMove.x * cell, margin + lastMove.y * cell, cell * 0.18, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function drawStone(x, y, color){
+  const r = cell * 0.44;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.35)';
+  ctx.shadowBlur = 4;
+  ctx.shadowOffsetY = 2;
+  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+  if(color === 1){ g.addColorStop(0, '#666'); g.addColorStop(1, '#000'); }
+  else { g.addColorStop(0, '#ffffff'); g.addColorStop(1, '#c9c9c9'); }
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function getCell(ev){
+  const rect = canvas.getBoundingClientRect();
+  const cx = ev.clientX - rect.left;
+  const cy = ev.clientY - rect.top;
+  const gx = Math.round((cx - margin) / cell);
+  const gy = Math.round((cy - margin) / cell);
+  if(gx < 0 || gx > 14 || gy < 0 || gy > 14) return null;
+  const px = margin + gx * cell, py = margin + gy * cell;
+  if(Math.hypot(cx - px, cy - py) > cell * 0.45) return null;
+  return { x: gx, y: gy };
+}
+
+function onTap(ev){
+  const c = getCell(ev);
+  if(!c) return;
+  if(mode === 'local') localPlay(c.x, c.y);
+  else if(mode === 'ai') aiPlay(c.x, c.y);
+  else onlinePlay(c.x, c.y);
+}
+
+canvas.addEventListener('click', onTap);
+canvas.addEventListener('touchstart', function(ev){
+  ev.preventDefault();
+  if(ev.touches.length === 1) onTap(ev.touches[0]);
+}, { passive:false });
+
+function applyMove(x, y, color){
+  board[x][y] = color;
+  moves.push({ x:x, y:y, color:color });
+  lastMove = { x:x, y:y };
+  draw();
+  if(checkWin(x, y, color)){ endGame(color); return true; }
+  if(moves.length === N * N){ endGame(0); return true; }
+  return false;
+}
+
+function checkWin(x, y, c){
+  const dirs = [[1,0],[0,1],[1,1],[1,-1]];
+  for(let d = 0; d < dirs.length; d++){
+    const dx = dirs[d][0], dy = dirs[d][1];
+    let cnt = 1;
+    for(let s = 1; s < 5; s++){
+      const nx = x + dx * s, ny = y + dy * s;
+      if(nx < 0 || nx > 14 || ny < 0 || ny > 14 || board[nx][ny] !== c) break;
+      cnt++;
+    }
+    for(let s = 1; s < 5; s++){
+      const nx = x - dx * s, ny = y - dy * s;
+      if(nx < 0 || nx > 14 || ny < 0 || ny > 14 || board[nx][ny] !== c) break;
+      cnt++;
+    }
+    if(cnt >= 5) return true;
+  }
+  return false;
+}
+
+function endGame(winner){
+  gameOver = true;
+  if(aiTimer){ clearTimeout(aiTimer); aiTimer = null; }
+  const name = winner === 0 ? '平局' : (winner === 1 ? '黑方获胜' : '白方获胜');
+  setStatus('🏆 ' + name);
+  saveHistory(winner);
+}
+
+function modeName(){
+  return mode === 'local' ? '本地双人' : (mode === 'ai' ? '人机对战' : '联机对战');
+}
+
+function saveHistory(winner){
+  try{
+    let h = JSON.parse(localStorage.getItem('gomoku_history') || '[]');
+    h.unshift({
+      mode: modeName(),
+      result: winner === 0 ? '平局' : (winner === 1 ? '黑方胜' : '白方胜'),
+      steps: moves.length,
+      time: new Date().toLocaleString('zh-CN', { hour12:false })
+    });
+    if(h.length > 50) h = h.slice(0, 50);
+    localStorage.setItem('gomoku_history', JSON.stringify(h));
+    renderHistory();
+  }catch(e){}
+}
+
+function updateInfo(){
+  if(gameOver) return;
+  if(mode === 'online'){
+    if(!onlineStarted) turnEl.textContent = '等待对手加入...';
+    else turnEl.textContent = (current === myColor) ? '轮到你落子' : '等待对方落子...';
+  } else {
+    turnEl.textContent = '当前: ' + (current === 1 ? '黑棋' : '白棋');
+  }
+  turnDot.className = 'dot ' + (current === 1 ? 'black' : 'white');
+}
+
+function localPlay(x, y){
+  if(gameOver || board[x][y]) return;
+  if(applyMove(x, y, current)) return;
+  current = current === 1 ? 2 : 1;
+  updateInfo();
+}
+
+function aiPlay(x, y){
+  if(gameOver || current !== 1 || board[x][y]) return;
+  if(applyMove(x, y, 1)) return;
+  current = 2;
+  updateInfo();
+  aiTimer = setTimeout(aiMove, 350);
+}
+
+function lineScore(count, open){
+  if(count >= 5) return 1000000;
+  if(open === 0) return 0;
+  const t2 = [0, 10, 100, 1000, 100000];
+  const t1 = [0, 5, 50, 500, 50000];
+  return open === 2 ? (t2[count] || 0) : (t1[count] || 0);
+}
+
+function pointScore(x, y, c){
+  let score = 0;
+  const dirs = [[1,0],[0,1],[1,1],[1,-1]];
+  for(let d = 0; d < dirs.length; d++){
+    const dx = dirs[d][0], dy = dirs[d][1];
+    let count = 1, open = 0;
+    let nx = x + dx, ny = y + dy;
+    while(nx >= 0 && nx < 15 && ny >= 0 && ny < 15 && board[nx][ny] === c){ count++; nx += dx; ny += dy; }
+    if(nx >= 0 && nx < 15 && ny >= 0 && ny < 15 && board[nx][ny] === 0) open++;
+    nx = x - dx; ny = y - dy;
+    while(nx >= 0 && nx < 15 && ny >= 0 && ny < 15 && board[nx][ny] === c){ count++; nx -= dx; ny -= dy; }
+    if(nx >= 0 && nx < 15 && ny >= 0 && ny < 15 && board[nx][ny] === 0) open++;
+    score += lineScore(count, open);
+  }
+  return score;
+}
+
+function findBestMove(){
+  let best = -1, bx = 7, by = 7;
+  for(let x = 0; x < 15; x++){
+    for(let y = 0; y < 15; y++){
+      if(board[x][y]) continue;
+      const off = pointScore(x, y, 2);
+      const def = pointScore(x, y, 1);
+      const center = (14 - Math.abs(x - 7) - Math.abs(y - 7)) * 2;
+      const score = off + def * 0.9 + center;
+      if(score > best){ best = score; bx = x; by = y; }
+    }
+  }
+  return { x: bx, y: by };
+}
+
+function aiMove(){
+  aiTimer = null;
+  if(gameOver || mode !== 'ai') return;
+  const b = findBestMove();
+  if(applyMove(b.x, b.y, 2)) return;
+  current = 1;
+  updateInfo();
+}
+
+function undo(){
+  if(mode === 'online' || moves.length === 0) return;
+  if(aiTimer){ clearTimeout(aiTimer); aiTimer = null; }
+  gameOver = false;
+  if(mode === 'local'){
+    const m = moves.pop();
+    board[m.x][m.y] = 0;
+    lastMove = moves.length ? moves[moves.length - 1] : null;
+    current = m.color;
+  } else if(mode === 'ai'){
+    let removed = 0;
+    while(moves.length && removed < 2){
+      const m = moves.pop();
+      board[m.x][m.y] = 0;
+      removed++;
+    }
+    lastMove = moves.length ? moves[moves.length - 1] : null;
+    current = 1;
+  }
+  draw();
+  setStatus('');
+  updateInfo();
+}
+
+function resetHandler(){
+  if(mode === 'online' && onlineStarted){
+    sendMsg({ type:'reset' });
+  }
+  resetGame();
+  setStatus(mode === 'online' ? '已重置对局' : '');
+}
+
+function resetGame(){
+  initBoard();
+  draw();
+  updateInfo();
+}
+
+function sendMsg(obj){
+  if(ws && ws.readyState === WebSocket.OPEN){
+    try{ ws.send(JSON.stringify(obj)); }catch(e){}
+  }
+}
+
+function connectSocket(action){
+  const addr = $('wsAddr').value.trim();
+  if(!/^wss?:\/\//.test(addr)){ setStatus('请输入正确的 ws 地址'); return; }
+  if(ws){
+    try{ ws.onclose = null; ws.onerror = null; ws.close(); }catch(e){}
+  }
+  pendingAction = action || null;
+  try{ ws = new WebSocket(addr); }catch(e){ setStatus('连接失败'); return; }
+  setStatus('正在连接...');
+  ws.onopen = function(){
+    reconnectAttempts = 0;
+    if(pendingAction){ const a = pendingAction; pendingAction = null; sendMsg(a); }
+    else setStatus('已连接服务器');
+  };
+  ws.onmessage = handleMsg;
+  ws.onclose = function(){
+    if(mode === 'online' && roomCode && myColor){
+      setStatus('连接断开，正在重连...');
+      scheduleReconnect();
+    }
+  };
+  ws.onerror = function(){ try{ ws.close(); }catch(e){} };
+}
+
+function scheduleReconnect(){
+  if(reconnectTimer) return;
+  const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts++));
+  reconnectTimer = setTimeout(function(){
+    reconnectTimer = null;
+    connectSocket({ type:'rejoin', room: roomCode, color: myColor });
+  }, delay);
+}
+
+function createRoom(){
+  const code = $('roomCode').value.trim();
+  if(!/^\d{4}$/.test(code)){ setStatus('请输入4位数字房间码'); return; }
+  myColor = 0; roomCode = ''; onlineStarted = false;
+  connectSocket({ type:'create', room: code });
+}
+
+function joinRoom(){
+  const code = $('roomCode').value.trim();
+  if(!/^\d{4}$/.test(code)){ setStatus('请输入4位数字房间码'); return; }
+  myColor = 0; roomCode = ''; onlineStarted = false;
+  connectSocket({ type:'join', room: code });
+}
+
+function handleMsg(e){
+  let msg;
+  try{ msg = JSON.parse(e.data); }catch(err){ return; }
+  switch(msg.type){
+    case 'created':
+      myColor = 1; roomCode = msg.room; onlineStarted = false;
+      resetGame();
+      setStatus('房间 ' + msg.room + ' 已创建，你是黑方，等待对手加入...');
+      break;
+    case 'joined':
+      myColor = 2; roomCode = msg.room; onlineStarted = false;
+      resetGame();
+      setStatus('已加入房间 ' + msg.room + '，你是白方，等待开始...');
+      break;
+    case 'rejoined':
+      myColor = msg.color; roomCode = msg.room;
+      setStatus('重连成功');
+      break;
+    case 'start':
+      onlineStarted = true;
+      resetGame();
+      setStatus('对局开始，你是' + (myColor === 1 ? '黑方' : '白方'));
+      break;
+    case 'resume':
+      onlineStarted = true;
+      setStatus('对局继续');
+      break;
+    case 'sync':
+      resetGame();
+      (msg.moves || []).forEach(function(m){
+        board[m.x][m.y] = m.color;
+        moves.push(m);
+      });
+      if(moves.length){
+        lastMove = moves[moves.length - 1];
+        if(checkWin(lastMove.x, lastMove.y, lastMove.color)){
+          gameOver = true;
+          setStatus('🏆 ' + (lastMove.color === 1 ? '黑方获胜' : '白方获胜'));
+        } else if(moves.length === N * N){
+          gameOver = true;
+          setStatus('🏆 平局');
+        }
+      }
+      current = (moves.length % 2 === 0) ? 1 : 2;
+      draw();
+      updateInfo();
+      break;
+    case 'move':
+      if(msg.x == null || msg.y == null || msg.color == null) break;
+      if(board[msg.x][msg.y]) break;
+      applyMove(msg.x, msg.y, msg.color);
+      current = msg.color === 1 ? 2 : 1;
+      updateInfo();
+      break;
+    case 'reset':
+      resetGame();
+      setStatus('对方重置了对局');
+      break;
+    case 'chat':
+      addChat(msg);
+      break;
+    case 'opponent_disconnected':
+      setStatus('对方已断开，等待重连...');
+      break;
+    case 'error':
+      setStatus('❌ ' + msg.message);
+      break;
+    case 'pong':
+      break;
+  }
+}
+
+function onlinePlay(x, y){
+  if(gameOver || !onlineStarted) return;
+  if(board[x][y]) return;
+  if(current !== myColor){ setStatus('还没轮到你落子'); return; }
+  if(applyMove(x, y, myColor)) return;
+  current = myColor === 1 ? 2 : 1;
+  updateInfo();
+  sendMsg({ type:'move', x:x, y:y, color:myColor });
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, function(c){
+    return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+  });
+}
+
+function addChat(msg){
+  const box = $('chatMsgs');
+  const div = document.createElement('div');
+  div.className = 'msg ' + (msg.self ? 'me' : 'other');
+  const who = msg.self ? '我' : (msg.from === 1 ? '黑方' : '白方');
+  div.innerHTML = '<span class="who">' + who + '</span>' + escapeHtml(msg.text);
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function sendChat(){
+  const inp = $('chatInput');
+  const text = inp.value.trim();
+  if(!text) return;
+  if(!ws || ws.readyState !== WebSocket.OPEN){ setStatus('尚未连接'); return; }
+  sendMsg({ type:'chat', text:text, from:myColor });
+  addChat({ text:text, from:myColor, self:true });
+  inp.value = '';
+}
+
+function renderHistory(){
+  const list = $('historyList');
+  try{
+    const h = JSON.parse(localStorage.getItem('gomoku_history') || '[]');
+    if(!h.length){ list.innerHTML = '<div class="empty">暂无记录</div>'; return; }
+    list.innerHTML = '';
+    h.forEach(function(r){
+      const d = document.createElement('div');
+      d.className = 'h-item';
+      d.innerHTML = '<span>' + escapeHtml(r.time) + '</span><span class="tag">' + escapeHtml(r.mode) + '</span><span>' + escapeHtml(r.result) + '</span><span>' + r.steps + '手</span>';
+      list.appendChild(d);
+    });
+  }catch(e){}
+}
+
+function setMode(m){
+  mode = m;
+  const btns = document.querySelectorAll('.mode-btn');
+  for(let i = 0; i < btns.length; i++){
+    btns[i].classList.toggle('active', btns[i].dataset.mode === m);
+  }
+  $('connPanel').classList.toggle('show', m === 'online');
+  $('chatPanel').classList.toggle('show', m === 'online');
+  $('undoBtn').style.display = (m === 'online') ? 'none' : 'inline-block';
+  if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if(aiTimer){ clearTimeout(aiTimer); aiTimer = null; }
+  if(m !== 'online' && ws){
+    try{ ws.onclose = null; ws.close(); }catch(e){}
+    ws = null;
+    onlineStarted = false;
+  }
+  resetGame();
+  setStatus('');
+}
+
+document.querySelectorAll('.mode-btn').forEach(function(b){
+  b.addEventListener('click', function(){ setMode(b.dataset.mode); });
+});
+$('createBtn').addEventListener('click', createRoom);
+$('joinBtn').addEventListener('click', joinRoom);
+$('undoBtn').addEventListener('click', undo);
+$('resetBtn').addEventListener('click', resetHandler);
+$('sendChat').addEventListener('click', sendChat);
+$('chatInput').addEventListener('keydown', function(e){ if(e.key === 'Enter') sendChat(); });
+document.querySelectorAll('.emoji-row button').forEach(function(b){
+  b.addEventListener('click', function(){
+    const inp = $('chatInput');
+    inp.value += b.textContent;
+    inp.focus();
+  });
+});
+$('clearHistory').addEventListener('click', function(){
+  localStorage.removeItem('gomoku_history');
+  renderHistory();
+});
+
+document.addEventListener('gesturestart', function(e){ e.preventDefault(); });
+document.addEventListener('dblclick', function(e){ e.preventDefault(); });
+let lastTouchEnd = 0;
+document.addEventListener('touchend', function(e){
+  const now = Date.now();
+  if(now - lastTouchEnd <= 300) e.preventDefault();
+  lastTouchEnd = now;
+}, { passive:false });
+
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', function(){ setTimeout(resize, 200); });
+
+(function(){
+  const inp = $('wsAddr');
+  if(!inp.value.trim()){
+    inp.value = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+  }
+})();
+
+initBoard();
+setMode('local');
+resize();
+renderHistory();
+
+})();
+</script>
+</body>
+</html>
